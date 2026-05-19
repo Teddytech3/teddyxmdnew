@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TEDDY-XMD | WhatsApp Bot</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="login-container">
+        <div class="login-box">
+            <h2>TEDDY XMD 🍂</h2>
+            <input type="password" id="password" placeholder="Enter password">
+            <button onclick="checkPassword()">Unlock</button>
+            <p id="login-error" class="error"></p>
+        </div>
+    </div>
+    <div id="dashboard" style="display:none;">
+        <div class="header">
+            <h1>🔥 TEDDY-XMD 🍂 Dashboard</h1>
+            <p>Multi-session WhatsApp Bot with 200+ Commands</p>
+        </div>
+        <div class="stats-card">
+            <h3>📊 Live Stats</h3>
+            <p>👥 Connected sessions: <span id="session-count">0</span></p>
+            <p>📱 Numbers: <span id="numbers-list">-</span></p>
+            <p>⏱️ Uptime: <span id="uptime">-</span></p>
+        </div>
+        <div class="actions">
+            <div class="card">
+                <h3>🔐 QR Login</h3>
+                <input type="text" id="qr-number" placeholder="+2547xxxxxxxxx">
+                <button onclick="getQR()">Generate QR</button>
+                <div id="qr-code"></div>
+            </div>
+            <div class="card">
+                <h3>🔢 Pairing Code</h3>
+                <input type="text" id="pair-number" placeholder="+2547xxxxxxxxx">
+                <button onclick="getPairCode()">Get Code</button>
+                <p id="pair-result"></p>
+            </div>
+        </div>
+        <div class="instructions">
+            <h3>📖 How to use</h3>
+            <ul>
+                <li>Send <code>.menu</code> in any WhatsApp chat to see all commands.</li>
+                <li>Use <code>.menu &lt;category&gt;</code> (e.g., <code>.menu media</code>).</li>
+                <li>Use <code>.dl &lt;link&gt;</code> to download media from YouTube, TikTok, etc.</li>
+                <li>Owner only: <code>.broadcast</code>, <code>.sessions</code>, <code>.restore</code></li>
+            </ul>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
