@@ -1,6 +1,6 @@
 function checkPassword() {
     const pwd = document.getElementById('password').value;
-    if (pwd === 'precious') {
+    if (pwd === 'teddyxmd') {
         document.getElementById('login-container').style.display = 'none';
         document.getElementById('dashboard').style.display = 'block';
         fetchStats();
