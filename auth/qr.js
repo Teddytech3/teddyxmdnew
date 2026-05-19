@@ -1,0 +1,307 @@
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  delay,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys')
+
+const { Boom } = require('@hapi/boom')
+const pino = require('pino')
+const fs = require('fs')
+const path = require('path')
+const qrcode = require('qrcode')
+const { handleCommand } = require('./commands')
+
+const SESSIONS_DIR = path.join(__dirname, '..', 'sessions')
+const logger = pino({ level: 'silent' })
+
+const sessions = new Map()
+const qrStore = new Map()
+
+async function createSessionViaQR(number) {
+  if (sessions.has(number)) {
+    console.log(`[SESSION] Already connected: ${number}`)
+    return sessions.get(number)
+  }
+
+  const sessDir = path.join(SESSIONS_DIR, number)
+  if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true })
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessDir)
+  const { version } = await fetchLatestBaileysVersion()
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    browser: ['Precious MD', 'Chrome', '3.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 0,
+    keepAliveIntervalMs: 10000,
+    markOnlineOnConnect: false,
+    syncFullHistory: false
+  })
+
+  sock.ev.on('creds.update', saveCreds)
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update
+
+    if (qr) {
+      try {
+        const base64 = await qrcode.toDataURL(qr)
+        qrStore.set(number, base64)
+        console.log(`[SESSION] QR ready: ${number}`)
+      } catch (e) {
+        console.error('[SESSION] QR error:', e.message)
+      }
+    }
+
+    if (connection === 'open') {
+      console.log(`[SESSION] ✅ Connected: ${number}`)
+      sessions.set(number, sock)
+      qrStore.delete(number)
+    }
+
+    if (connection === 'close') {
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode
+      console.log(`[SESSION] ❌ Disconnected: ${number} code=${code}`)
+      sessions.delete(number)
+
+      if (code !== DisconnectReason.loggedOut) {
+        console.log(`[SESSION] 🔄 Reconnecting: ${number}`)
+        await delay(4000)
+        createSessionViaQR(number)
+      } else {
+        console.log(`[SESSION] 🚫 Logged out, removing: ${number}`)
+        fs.rmSync(sessDir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  // Main Command handler
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return
+    for (const msg of messages) {
+      try {
+        await handleCommand(msg, sock, sessions)
+      } catch (e) {
+        console.error('[SESSION] handleCommand error:', e.message)
+      }
+    }
+  })
+
+  // ✅ AUTO-VIEW STATUS HANDLER with 🍂 reaction
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const m of messages) {
+      try {
+        if (m.message?.protocolMessage?.type === 7) {
+          const { isEnabled } = require('../plugins/automation/autoview')
+          if (isEnabled && isEnabled(number)) {
+            await sock.readMessages([m.key])
+            await sock.sendMessage(m.key.remoteJid, { 
+              react: { text: '🍂', key: m.key } 
+            }).catch(() => {})
+            console.log(`[AUTOVIEW] Viewed status for ${number} with 🍂`)
+          }
+        }
+      } catch (e) {
+        // Silent fail
+      }
+    }
+  })
+
+  // ✅ WELCOME / GOODBYE HANDLER
+  sock.ev.on('group-participants.update', async (update) => {
+    const { id, participants, action } = update
+    
+    try {
+      const welcome = require('../plugins/group/welcome')
+      const goodbye = require('../plugins/group/goodbye')
+      
+      if (action === 'add' && welcome.isEnabled && welcome.isEnabled(id)) {
+        for (const participant of participants) {
+          const name = participant.split('@')[0]
+          await sock.sendMessage(id, { 
+            text: `👋 *Welcome!* @${name}\n\nWelcome to the group! Enjoy your stay. 🎉\n\n📌 Read group rules and have fun!`,
+            mentions: [participant]
+          }).catch(() => {})
+          console.log(`[WELCOME] Welcomed ${name} to ${id}`)
+        }
+      }
+      
+      if (action === 'remove' && goodbye.isEnabled && goodbye.isEnabled(id)) {
+        for (const participant of participants) {
+          const name = participant.split('@')[0]
+          await sock.sendMessage(id, { 
+            text: `👋 *Goodbye!* @${name}\n\nWe'll miss you! Take care. 👋`,
+            mentions: [participant]
+          }).catch(() => {})
+          console.log(`[GOODBYE] Said goodbye to ${name} from ${id}`)
+        }
+      }
+    } catch (err) {
+      console.error('[GROUP-EVENTS] Error:', err.message)
+    }
+  })
+
+  sessions.set(number, sock)
+  return sock
+}
+
+async function createSessionViaPairing(number) {
+  if (sessions.has(number)) {
+    throw new Error('Number already connected!')
+  }
+
+  const sessDir = path.join(SESSIONS_DIR, number)
+  if (!fs.existsSync(sessDir)) fs.mkdirSync(sessDir, { recursive: true })
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessDir)
+  const { version } = await fetchLatestBaileysVersion()
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    browser: ['TEDDY-XMD', 'Chrome', '3.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 0,
+    keepAliveIntervalMs: 10000,
+    markOnlineOnConnect: false,
+    syncFullHistory: false
+  })
+
+  sock.ev.on('creds.update', saveCreds)
+
+  let pairCode = null
+  let codeDone = false
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update
+
+    if (!codeDone && !sock.authState.creds.registered) {
+      codeDone = true
+      await delay(1500)
+      try {
+        pairCode = await sock.requestPairingCode(number)
+        console.log(`[SESSION] Pair code for ${number}: ${pairCode}`)
+      } catch (e) {
+        console.error('[SESSION] requestPairingCode error:', e.message)
+      }
+    }
+
+    if (connection === 'open') {
+      console.log(`[SESSION] ✅ Paired: ${number}`)
+      sessions.set(number, sock)
+
+      // Command handler for paired session
+      sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return
+        for (const msg of messages) {
+          try {
+            await handleCommand(msg, sock, sessions)
+          } catch (e) {
+            console.error('[SESSION] handleCommand error:', e.message)
+          }
+        }
+      })
+
+      // ✅ AUTO-VIEW for paired session
+      sock.ev.on('messages.upsert', async ({ messages }) => {
+        for (const m of messages) {
+          try {
+            if (m.message?.protocolMessage?.type === 7) {
+              const { isEnabled } = require('../plugins/automation/autoview')
+              if (isEnabled && isEnabled(number)) {
+                await sock.readMessages([m.key])
+                await sock.sendMessage(m.key.remoteJid, { 
+                  react: { text: '🍂', key: m.key } 
+                }).catch(() => {})
+                console.log(`[AUTOVIEW] Viewed status for ${number} with 🍂`)
+              }
+            }
+          } catch (e) {}
+        }
+      })
+
+      // ✅ WELCOME/GOODBYE for paired session
+      sock.ev.on('group-participants.update', async (update) => {
+        const { id, participants, action } = update
+        
+        try {
+          const welcome = require('../plugins/group/welcome')
+          const goodbye = require('../plugins/group/goodbye')
+          
+          if (action === 'add' && welcome.isEnabled && welcome.isEnabled(id)) {
+            for (const participant of participants) {
+              const name = participant.split('@')[0]
+              await sock.sendMessage(id, { 
+                text: `👋 *Welcome!* @${name}\n\nWelcome to the group! 🎉`,
+                mentions: [participant]
+              }).catch(() => {})
+            }
+          }
+          
+          if (action === 'remove' && goodbye.isEnabled && goodbye.isEnabled(id)) {
+            for (const participant of participants) {
+              const name = participant.split('@')[0]
+              await sock.sendMessage(id, { 
+                text: `👋 *Goodbye!* @${name}\n\nWe'll miss you! 👋`,
+                mentions: [participant]
+              }).catch(() => {})
+            }
+          }
+        } catch (err) {
+          console.error('[GROUP-EVENTS] Error:', err.message)
+        }
+      })
+    }
+
+    if (connection === 'close') {
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode
+      sessions.delete(number)
+      if (code !== DisconnectReason.loggedOut) {
+        await delay(4000)
+        createSessionViaQR(number)
+      } else {
+        fs.rmSync(sessDir, { recursive: true, force: true })
+      }
+    }
+  })
+
+  for (let i = 0; i < 40; i++) {
+    await delay(500)
+    if (pairCode) break
+  }
+
+  if (!pairCode) throw new Error('Could not generate pairing code. Try again.')
+  return pairCode
+}
+
+async function restoreAllSessions() {
+  if (!fs.existsSync(SESSIONS_DIR)) {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true })
+    return
+  }
+
+  const folders = fs.readdirSync(SESSIONS_DIR).filter(f =>
+    fs.statSync(path.join(SESSIONS_DIR, f)).isDirectory()
+  )
+
+  console.log(`[SESSION] Restoring ${folders.length} session(s)...`)
+
+  for (const num of folders) {
+    try {
+      await createSessionViaQR(num)
+      await delay(2500)
+    } catch (e) {
+      console.error(`[SESSION] Failed to restore ${num}:`, e.message)
+    }
+  }
+}
+
+module.exports = { sessions, qrStore, createSessionViaQR, createSessionViaPairing, restoreAllSessions }
